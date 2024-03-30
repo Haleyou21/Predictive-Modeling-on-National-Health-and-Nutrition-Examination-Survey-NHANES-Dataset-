@@ -1,0 +1,929 @@
+```{r}
+library(tidyverse)
+```
+```{r}
+# Set the path to the .rda file
+path_to_file <- "/Users/ohyay/Desktop/PH644/nhanes2003-2004.Rda"
+
+# Load the .rda file
+load(path_to_file)
+
+# Now the datasets saved in the .rda file are available in your R environment
+
+```
+
+
+# Filter the data set
+```{r}
+selected_columns <- c("SEQN","RIDAGEYR", "RIAGENDR", "BPQ010", "BPQ060", "DIQ010", "DIQ050", "DIQ090", 
+                      "MCQ010", "MCQ053", "MCQ160A", "MCQ160B", "MCQ160K", "MCQ160L", "BMXWAIST", 
+                      "MCQ160M", "MCQ220", "MCQ245A", "MCQ250A", "MCQ250B", "MCQ250C", "MCQ250E", 
+                      "MCQ250F", "MCQ250G", "MCQ265", "SSQ011", "SSQ051", "WHQ030", "WHQ040", 
+                      "LBXRDW", "HSD010", "BPXPULS", "BPXML1", "VIQ200", "BMXBMI", "BPXSY1", 
+                      "BPXDI1", "mortstat")
+```
+
+
+```{r}
+# Subset the data to keep only the selected columns
+nhanes2003_2004_subset <- nhanes2003_2004[, selected_columns]
+
+# Convert the columns to numeric
+cols_to_convert <- c("RIDAGEYR", "BMXWAIST", "LBXRDW", "BMXBMI", "BPXSY1", "BPXDI1")
+for (col in cols_to_convert) {
+  nhanes2003_2004_subset[[col]] <- as.numeric(as.character(nhanes2003_2004_subset[[col]]))
+}
+
+# Filter for RIDAGEYR >= 50
+nhanes2003_2004_subset <- nhanes2003_2004_subset[nhanes2003_2004_subset$RIDAGEYR >= 50, ]
+```
+
+```{r}
+dim(nhanes2003_2004_subset)
+```
+
+
+```{r}
+# Count the missing values for each selected variable
+missing_counts <- sapply(nhanes2003_2004_subset[, selected_columns], function(col) sum(is.na(col)))
+
+# Print the missing values counts
+print(missing_counts)
+```
+
+Here noticed some missing values. 
+
+
+# Missing values
+
+## Explore Missingness Type
+Firstly let's explore variables types
+
+```{r}
+str(nhanes2003_2004_subset)
+```
+
+
+
+Continuous variable: BMXWAIST, LBXRDW, BMXBMI,BPXSY1, BPXDI1, 
+Categorical variable: HSD010, BPXPULS, BPXML1, VIQ200
+
+
+Noted: HSD010 (General health condition) and BPXML1 (MIL: maximum inflation levels (mm Hg)); BPXSY1(Systolic: Blood pressure (first reading) mm Hg) and BPXDI1 (Diastolic: Blood pressure (first reading) mm Hg); Seems there's some pattern between them.
+
+
+### Visualization
+```{r}
+library(visdat)
+vis_miss(nhanes2003_2004_subset)
+```
+
+There doesn't appear to be a clear systematic pattern of missingness across observations. For example, it's not the case that the same set of rows always has missing values across all variables.
+
+Some variables with missing values seem to have the same rows missing when looked at together (e.g., BPXSY1 and BPXDI1), suggesting potential Missing At Random patterns.
+
+
+### Statistical Tests for MCAR - continuous variables
+```{r}
+library(haven)
+library(naniar)
+# Apply Little's MCAR Test on the specified numeric variables
+mcar_result <- mcar_test(data = nhanes2003_2004_subset[cols_to_convert])
+print(mcar_result)
+
+```
+Given the very small p-value, the test suggests that the missing data is not missing completely at random (MCAR). I think it's more like Missing At Random (MAR).
+
+
+## Imputation
+
+### mortstat
+For "mortstat", there is only 6, so maybe just simply remove them should be fine. 
+
+```{r}
+nhanes2003_2004_filtered <- nhanes2003_2004_subset[!is.na(nhanes2003_2004_subset$mortstat), ]
+```
+
+
+### Continuous
+```{r}
+library(mice)
+missing_vars <- names(nhanes2003_2004_filtered)[apply(nhanes2003_2004_filtered, 2, function(x) any(is.na(x)))]
+print(missing_vars)
+
+```
+
+MAR is the assumption for Multiple Imputation by Chained Equations (MICE).
+```{r}
+# Select only continuous variables with missing values
+cont_data <- nhanes2003_2004_filtered[, c("BMXWAIST", "LBXRDW", "BMXBMI", "BPXSY1", "BPXDI1")]
+
+# Specify methods for continuous variables
+cont_methods <- c(
+  BMXWAIST = "pmm",
+  LBXRDW = "pmm",
+  BMXBMI = "pmm",
+  BPXSY1 = "pmm",
+  BPXDI1 = "pmm"
+)
+
+# Perform imputation for continuous variables
+imputed_cont_data <- mice(cont_data, m=10, maxit=20, method=cont_methods, seed=500)
+```
+
+#### Pooling
+
+```{r}
+fit <- with(imputed_cont_data, lm(BPXDI1 ~ BMXWAIST + LBXRDW + BMXBMI + BPXSY1))
+pooled_results <- pool(fit)
+summary_pooled <- summary(pooled_results)
+print(summary(pooled_results))
+
+
+```
+
+```{r}
+# Between-Imputation Variance
+between_variance <- pooled_results$pooled$b
+
+
+# RIV
+within_variance <- pooled_results$pooled$ubar
+total_variance <- pooled_results$pooled$t
+RIV <- (total_variance - within_variance) / total_variance
+
+
+# FMI
+FMI <- pooled_results$pooled$fmi
+
+
+```
+
+```{r}
+between_variance
+RIV
+FMI
+```
+
+Notably, the variance for the first variable is significantly higher compared to the others. The RIV values are below 0.5 for all variables, which suggests moderate variability. The fourth variable (with an RIV of 0.4924878) has the highest relative increase in variance, nearing 50% of its total variance due to between-imputation variance. The FMI values suggest that around 24% to 52% of the total information is missing for these variables. Specifically, the fourth variable again stands out, with over half (51.8%) of its information being missing.
+
+
+The imputed data seems to be moderately reliable, with some level of consistency across imputed datasets.
+
+
+
+The fourth variable is the most uncertain, with almost half of its total variance due to imputation and over half of its information missing. This suggests that more careful consideration and perhaps alternative imputation strategies or models might be needed for this variable.
+
+
+
+The first variable also has a notably high between-imputation variance, indicating it may be more sensitive to the imputation process.
+
+
+
+#### Visualization of Imputed Data
+```{r}
+mice::densityplot(imputed_cont_data)
+```
+
+Similar pattern can be find from the plot. 
+
+```{r}
+original_summary <- sapply(cont_data, function(x) c(mean = mean(x, na.rm = TRUE), var = var(x, na.rm = TRUE)))
+imputed_summary <- sapply(complete(imputed_cont_data, 7), function(x) c(mean = mean(x), var = var(x)))
+
+# Printing the summaries
+print(original_summary)
+print(imputed_summary)
+
+```
+Find data set 7 is the more reliable one after trying out different summary tables. 
+
+### Categorical 
+```{r}
+# Select only categorical variables with missing values
+cat_data <- nhanes2003_2004_filtered[, c("HSD010", "BPXPULS", "BPXML1", "VIQ200")]
+
+# Specify methods for categorical variables
+cat_methods <- c(
+  HSD010 = "polyreg",
+  BPXPULS = "logreg",
+  BPXML1 = "polyreg",
+  VIQ200 = "polyreg"
+)
+
+# Perform imputation for categorical variables
+imputed_cat_data <- mice(cat_data, m=10, maxit=20, method=cat_methods, seed=500)
+```
+
+```{r}
+library(nnet)
+
+fit_cat <- with(imputed_cat_data, multinom(HSD010 ~ BPXPULS + BPXML1 + VIQ200))
+```
+```{r}
+pooled_results_cat <- pool(fit_cat)
+summary_pooled_cat <- summary(pooled_results_cat)
+print(summary(pooled_results_cat))
+
+# Between-Imputation Variance
+between_variance_cat <- pooled_results_cat$pooled$b
+
+# RIV
+within_variance_cat <- pooled_results_cat$pooled$ubar
+total_variance_cat <- pooled_results_cat$pooled$t
+RIV_cat <- (total_variance_cat - within_variance_cat) / total_variance_cat
+
+# FMI
+FMI_cat <- pooled_results_cat$pooled$fmi
+
+```
+
+```{r}
+between_variance_cat
+RIV_cat
+FMI_cat
+
+```
+Notably, the variance for the variable BPXML1260 is significantly higher compared to the others, with values such as 11.870568680 indicating a substantial impact from imputation. The RIV values for most of the variables are below 0.5, suggesting moderate variability. However, BPXML1250, with an RIV of 0.951120612, exhibits the most substantial relative increase in variance, nearly 95% of its total variance due to between-imputation variance. The FMI values indicate that a significant portion of the total information is missing for these variables. Specifically, BPXML1250 stands out once more, with nearly 100% (or practically all) of its information being missing.
+
+The imputed data seems to be moderately reliable, with some level of consistency across imputed datasets.
+
+BPXML1250 is the most uncertain variable, with almost all of its total variance due to imputation and nearly all of its information missing. This suggests that more careful consideration and perhaps alternative imputation strategies or models might be needed for this variable.
+
+The variable BPXML1260 also has a notably high between-imputation variance, indicating it may be more sensitive to the imputation process.
+```{r}
+# Create a function to plot the barplots for each dataset
+plot_imputed_cat_data <- function(variable_name) {
+  op <- par(mfrow=c(2,5))  
+  
+  # Calculate the maximum frequency across all imputations for consistent plotting scale
+  max_freq <- max(sapply(1:10, function(i) {
+    data <- as.data.frame(complete(imputed_cat_data, i))
+    max(table(data[[variable_name]]))
+  }))
+  
+  for (i in 1:10) {
+    data <- as.data.frame(complete(imputed_cat_data, i))
+    counts <- table(data[[variable_name]])
+    barplot(counts, main=paste("Dataset", i), ylim=c(0, max_freq), las=2)
+  }
+  
+  par(op) # Reset layout
+}
+
+# Now call the function for each variable
+plot_imputed_cat_data("HSD010")
+plot_imputed_cat_data("BPXPULS")
+plot_imputed_cat_data("BPXML1")
+plot_imputed_cat_data("VIQ200")
+
+
+```
+
+
+Similar pattern can be find from the plot. 
+
+```{r}
+original_summary_cat <- sapply(cat_data, function(x) table(x, useNA = "always"))
+imputed_summary_cat <- sapply(complete(imputed_cat_data, 9), function(x) table(x))
+
+# Printing the summaries
+print(original_summary_cat)
+print(imputed_summary_cat)
+
+```
+
+
+```{r}
+# Extract the first imputed dataset for both continuous and categorical variables
+completed_cont <- complete(imputed_cont_data, 7)
+completed_cat <- complete(imputed_cat_data, 9)
+
+# Combine the datasets
+imputed_combined <- cbind(completed_cont, completed_cat)
+
+```
+
+
+#### replace missing values
+```{r}
+# Identify rows with any missing values in the original dataset
+rows_with_missing_values <- apply(nhanes2003_2004_filtered[, c("BMXWAIST", "LBXRDW", "BMXBMI", "BPXSY1", "BPXDI1", "HSD010", "BPXPULS", "BPXML1", "VIQ200")], 1, function(x) any(is.na(x)))
+
+# Replace
+nhanes2003_2004_filtered[rows_with_missing_values, c("BMXWAIST", "LBXRDW", "BMXBMI", "BPXSY1", "BPXDI1", "HSD010", "BPXPULS", "BPXML1", "VIQ200")] <- imputed_combined[rows_with_missing_values, ]
+```
+
+```{r}
+# double check
+missing_counts <- sapply(nhanes2003_2004_filtered[, selected_columns], function(col) sum(is.na(col)))
+
+print(missing_counts)
+
+```
+
+
+```{r}
+# Convert the new imputed values to numeric
+cols_to_convert <- c("BMXWAIST", "LBXRDW", "BMXBMI", "BPXSY1", "BPXDI1")
+for (col in cols_to_convert) {
+  nhanes2003_2004_filtered[[col]] <- as.numeric(as.character(nhanes2003_2004_filtered[[col]]))
+}
+
+# exclude SEQN since it's irrelavant
+nhanes2003_2004_filtered <- nhanes2003_2004_filtered[, !(names(nhanes2003_2004_filtered) == "SEQN")]
+
+```
+# Split Training/Test data set
+```{r}
+# Separate the dataset based on the value of mortstat
+data_0 <- subset(nhanes2003_2004_filtered, mortstat == 0)
+data_1 <- subset(nhanes2003_2004_filtered, mortstat == 1)
+
+# Set a seed for reproducibility
+set.seed(123)
+
+# Sample 80% of each category
+train_indices_0 <- sample(1:nrow(data_0), 0.8 * nrow(data_0))
+train_indices_1 <- sample(1:nrow(data_1), 0.8 * nrow(data_1))
+
+# Create training datasets for each category
+training_data_0 <- data_0[train_indices_0, ]
+training_data_1 <- data_1[train_indices_1, ]
+
+# Combine the two training datasets
+training_data <- rbind(training_data_0, training_data_1)
+
+# If you want a test set with the data not selected for the training set:
+test_data_0 <- data_0[-train_indices_0, ]
+test_data_1 <- data_1[-train_indices_1, ]
+test_data <- rbind(test_data_0, test_data_1)
+
+```
+
+```{r}
+# Count the number of ==0 and ==1 in the training_data
+training_counts <- table(training_data$mortstat)
+print(paste("Training Data:"))
+print(paste("==0:", training_counts["0"]))
+print(paste("==1:", training_counts["1"]))
+
+# Count the number of ==0 and ==1 in the test_data
+test_counts <- table(test_data$mortstat)
+print(paste("Test Data:"))
+print(paste("==0:", test_counts["0"]))
+print(paste("==1:", test_counts["1"]))
+
+```
+```{r}
+str(training_data)
+
+```
+
+# Data Pre-processing: Scaling - for SVM, LDA, QDA, GBM
+
+```{r}
+library(caret)
+library(e1071)
+library(dplyr)
+
+# Specify which variables are continuous and which are categorical
+continuous_vars <- c("RIDAGEYR", "LBXRDW", "BMXBMI", "BPXSY1", "BPXDI1") 
+categorical_vars <- c("RIAGENDR", "BPQ010", "DIQ010","DIQ050", "DIQ090", "MCQ010", "VIQ200", "BPXML1", "BPXPULS","HSD010", "WHQ040",  "WHQ030",  "SSQ051", "MCQ265", "MCQ250G", "MCQ250G", "MCQ250F", "MCQ250E", "MCQ250C", "MCQ250B", "MCQ250A", "MCQ245A", "MCQ220", "MCQ160M", "MCQ160L", "MCQ160K", "MCQ160B", "MCQ160A", "MCQ053")
+
+# Preprocess data
+preProcValues <- preProcess(training_data, 
+                            method = c("center", "scale"),
+                            scaling = center, 
+                            ignore = c(categorical_vars,"mortstat"))
+
+# Apply transformations to training data
+trainTransformed <- predict(preProcValues, training_data)
+
+
+formula_for_dummy <- as.formula(paste("~ . -", "mortstat"))
+trainTransformed <- dummyVars(formula_for_dummy, data = trainTransformed, fullRank = T) %>% predict(trainTransformed) %>% cbind(mortstat = training_data$mortstat)
+
+testTransformed <- predict(preProcValues, test_data)
+testTransformed <- dummyVars(formula_for_dummy, data = testTransformed, fullRank = T) %>% predict(testTransformed) %>% cbind(mortstat = test_data$mortstat) 
+```
+
+```{r}
+trainTransformed <- as.data.frame(trainTransformed)
+dim(trainTransformed)
+```
+
+# Feature Selection - RFE - for SVM, LDA, QDA, GBM
+```{r}
+
+outcomeName <- "mortstat"
+predictors <- setdiff(names(trainTransformed), outcomeName)
+
+ctrl <- rfeControl(functions=rfFuncs, method="cv", number=5)
+result <- rfe(as.formula(paste(outcomeName, "~", paste(predictors, collapse=" + "))), 
+              data = trainTransformed, 
+              sizes=c(1:20), 
+              rfeControl=ctrl)
+
+
+print(result)
+```
+
+```{r}
+testTransformed <- as.data.frame(testTransformed)
+```
+
+# SVM
+
+
+
+## Build simplest SVM with 20 variables
+```{r}
+svmModel <- svm(as.formula(paste(outcomeName, "~", paste(result$optVariables[1:20], collapse="+"))), data=trainTransformed, kernel="radial")
+
+predicted_vals_svm <- predict(svmModel, testTransformed)
+
+threshold <- 0.5
+binary_predicted_vals <- ifelse(predicted_vals_svm > threshold, 1, 0)
+
+confusion_mtx <- table(factor(testTransformed$mortstat, levels=c(0,1)), 
+                       factor(binary_predicted_vals, levels=c(0,1)))
+
+print(confusion_mtx)
+
+TP <- confusion_mtx[2,2]
+TN <- confusion_mtx[1,1]
+FP <- confusion_mtx[1,2]
+FN <- confusion_mtx[2,1]
+
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+
+print(paste("Sensitivity:", round(sensitivity, 3)))
+print(paste("Specificity:", round(specificity, 3)))
+print(paste("Accuracy:", round(accuracy, 3)))
+
+```
+
+
+## Try different parameters: cost=1, gamma=0.1
+```{r}
+# Train SVM on optimal subset of features
+svmModel <- svm(as.formula(paste(outcomeName, "~", paste(result$optVariables[1:20], collapse="+"))), data=trainTransformed, kernel="radial", cost=1, gamma=0.1)
+
+# Predict on test data
+predicted_vals_svm <- predict(svmModel, testTransformed)
+
+# Define a threshold to convert predicted values into binary class labels
+threshold <- 0.5
+binary_predicted_vals <- ifelse(predicted_vals_svm > threshold, 1, 0)
+
+# Generate confusion matrix
+confusion_mtx <- table(factor(testTransformed$mortstat, levels=c(0,1)), 
+                       factor(binary_predicted_vals, levels=c(0,1)))
+
+
+# Extract TP, TN, FP, FN from the confusion matrix
+TP <- confusion_mtx[2,2]
+TN <- confusion_mtx[1,1]
+FP <- confusion_mtx[1,2]
+FN <- confusion_mtx[2,1]
+
+# Calculate sensitivity, specificity, and accuracy
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+
+# Print the metrics
+print(paste("Sensitivity:", round(sensitivity, 3)))
+print(paste("Specificity:", round(specificity, 3)))
+print(paste("Accuracy:", round(accuracy, 3)))
+```
+
+
+## Try different parameters: cost=10, gamma=0.1
+```{r}
+svmModel <- svm(as.formula(paste(outcomeName, "~", paste(result$optVariables[1:20], collapse="+"))), data=trainTransformed, kernel="radial", cost=10, gamma=0.1)
+
+predicted_vals_svm <- predict(svmModel, testTransformed)
+
+threshold <- 0.5
+binary_predicted_vals <- ifelse(predicted_vals_svm > threshold, 1, 0)
+
+confusion_mtx <- table(factor(testTransformed$mortstat, levels=c(0,1)), 
+                       factor(binary_predicted_vals, levels=c(0,1)))
+
+
+TP <- confusion_mtx[2,2]
+TN <- confusion_mtx[1,1]
+FP <- confusion_mtx[1,2]
+FN <- confusion_mtx[2,1]
+
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+
+print(paste("Sensitivity:", round(sensitivity, 3)))
+print(paste("Specificity:", round(specificity, 3)))
+print(paste("Accuracy:", round(accuracy, 3)))
+```
+
+
+## Try different parameters: cost=100, gamma=0.1
+```{r}
+svmModel <- svm(as.formula(paste(outcomeName, "~", paste(result$optVariables[1:20], collapse="+"))), data=trainTransformed, kernel="radial", cost=100, gamma=0.1)
+
+predicted_vals_svm <- predict(svmModel, testTransformed)
+
+threshold <- 0.5
+binary_predicted_vals <- ifelse(predicted_vals_svm > threshold, 1, 0)
+
+confusion_mtx <- table(factor(testTransformed$mortstat, levels=c(0,1)), 
+                       factor(binary_predicted_vals, levels=c(0,1)))
+
+
+TP <- confusion_mtx[2,2]
+TN <- confusion_mtx[1,1]
+FP <- confusion_mtx[1,2]
+FN <- confusion_mtx[2,1]
+
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+
+print(paste("Sensitivity:", round(sensitivity, 3)))
+print(paste("Specificity:", round(specificity, 3)))
+print(paste("Accuracy:", round(accuracy, 3)))
+```
+
+When cost=100, gamma=0.1, SVM's sensitivity can reach 56% with 76% accuracy. With cost increases, it increased significantly. 
+
+
+
+# LDA
+Using RFE as feature selection process
+```{r}
+library(MASS)
+ldaModel <- lda(as.formula(paste(outcomeName, "~", paste(result$optVariables[1:20], collapse="+"))), data=trainTransformed)
+
+
+predicted_vals_lda <- predict(ldaModel, testTransformed)$class
+
+
+confusion_mtx_lda <- table(testTransformed$mortstat, predicted_vals_lda)
+print(confusion_mtx_lda)
+
+TP <- confusion_mtx_lda[2,2]
+TN <- confusion_mtx_lda[1,1]
+FP <- confusion_mtx_lda[1,2]
+FN <- confusion_mtx_lda[2,1]
+
+
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+
+print(paste("Sensitivity:", round(sensitivity, 3)))
+print(paste("Specificity:", round(specificity, 3)))
+print(paste("Accuracy:", round(accuracy, 3)))
+```
+LDA has 52% sensitivity and 81% accuracy.
+
+# QDA
+
+```{r}
+library(MASS)
+
+qdaModel <- qda(as.formula(paste(outcomeName, "~", paste(result$optVariables[1:20], collapse="+"))), data=trainTransformed)
+
+predicted_vals_qda <- predict(qdaModel, testTransformed)$class
+
+confusion_mtx_qda <- table(testTransformed$mortstat, predicted_vals_qda)
+
+TP <- confusion_mtx_qda[2,2]
+TN <- confusion_mtx_qda[1,1]
+FP <- confusion_mtx_qda[1,2]
+FN <- confusion_mtx_qda[2,1]
+
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+
+print(paste("Sensitivity:", round(sensitivity, 3)))
+print(paste("Specificity:", round(specificity, 3)))
+print(paste("Accuracy:", round(accuracy, 3)))
+
+```
+QDA has 43% sensitivity and 70% accuracy.
+
+# GBM
+```{r}
+library(gbm)
+
+set.seed(123)  
+gbmModel <- gbm(as.formula(paste(outcomeName, "~", paste(result$optVariables[1:20], collapse="+"))), 
+               data=trainTransformed, 
+               distribution="bernoulli", 
+               n.trees=100, 
+               interaction.depth=5,
+               shrinkage=0.1, 
+               n.minobsinnode=10)
+
+predicted_vals_gbm_prob <- predict(gbmModel, newdata=testTransformed, n.trees=100, type="response")
+predicted_vals_gbm <- ifelse(predicted_vals_gbm_prob > 0.5, 1, 0)  
+confusion_mtx_gbm <- table(testTransformed$mortstat, predicted_vals_gbm)
+
+TP <- confusion_mtx_gbm[2,2]
+TN <- confusion_mtx_gbm[1,1]
+FP <- confusion_mtx_gbm[1,2]
+FN <- confusion_mtx_gbm[2,1]
+
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+
+print(paste("Sensitivity:", round(sensitivity, 3)))
+print(paste("Specificity:", round(specificity, 3)))
+print(paste("Accuracy:", round(accuracy, 3)))
+
+```
+
+GBM has 56% sensitivity and 83% accuracy.
+
+# Logistic Regression
+
+## Check Collinearity
+```{r}
+library(car)
+
+# continuous variables
+continuous_vars <- c("RIDAGEYR", "LBXRDW", "BMXBMI", "BPXSY1", "BPXDI1")
+
+lm_for_vif <- lm(as.formula(paste("RIDAGEYR ~", paste(setdiff(continuous_vars, "RIDAGEYR"), collapse=" + "))), data=training_data)
+vif(lm_for_vif)
+
+```
+
+
+
+```{r}
+# categorical variables
+library(DescTools)
+
+categorical_vars <- c("RIAGENDR", "BPQ010", "DIQ010","DIQ050", "DIQ090", "MCQ010", "VIQ200", "BPXML1", "BPXPULS","HSD010", "WHQ040",  "WHQ030",  "SSQ051", "MCQ265", "MCQ250G", "MCQ250G", "MCQ250F", "MCQ250E", "MCQ250C", "MCQ250B", "MCQ250A", "MCQ245A", "MCQ220", "MCQ160M", "MCQ160L", "MCQ160K", "MCQ160B", "MCQ160A", "MCQ053") 
+# Initialize a matrix to store Cramer’s V values
+cramer_matrix <- matrix(0, nrow=length(categorical_vars), ncol=length(categorical_vars))
+rownames(cramer_matrix) <- categorical_vars
+colnames(cramer_matrix) <- categorical_vars
+
+# Loop through each pair of variables to calculate Cramer’s V
+for (i in 1:length(categorical_vars)) {
+    for (j in 1:length(categorical_vars)) {
+        # We'll only calculate the upper triangle of the matrix since Cramer's V is symmetrical
+        if (i < j) {
+            cramer_val <- CramerV(training_data[, categorical_vars[i]], training_data[, categorical_vars[j]])
+            cramer_matrix[i, j] <- cramer_val
+        }
+    }
+}
+
+# Print the matrix
+print(cramer_matrix)
+
+
+
+```
+There is no obvious collinearity issue.
+
+
+
+
+## Feature Selection using LASSO
+
+### Scaling
+```{r}
+num_vars <- sapply(training_data, is.numeric) & names(training_data) != "mortstat"
+
+training_data_scaled <- training_data
+training_data_scaled[, num_vars] <- scale(training_data[, num_vars])
+
+train_mean <- colMeans(training_data[, num_vars], na.rm = TRUE)
+train_sd <- apply(training_data[, num_vars], 2, sd, na.rm = TRUE)
+
+test_data_scaled <- test_data
+test_data_scaled[, num_vars] <- sweep(test_data[, num_vars], 2, train_mean, `-`) 
+test_data_scaled[, num_vars] <- sweep(test_data_scaled[, num_vars], 2, train_sd, `/`)
+
+
+```
+
+### LASSO choosing non-zero coef variables
+
+```{r}
+library(glmnet)
+library(caret)
+
+
+set.seed(123)
+
+x <- as.matrix(training_data_scaled[, -which(names(training_data_scaled) == "mortstat")])
+y <- training_data_scaled$mortstat
+
+cv.lasso <- cv.glmnet(x, y, alpha=1, family="binomial")
+best_lambda <- cv.lasso$lambda.min
+plot(cv.lasso)
+
+lasso_coef <- predict(cv.lasso, s=best_lambda, type="coefficients")[1:ncol(training_data_scaled),]
+print(lasso_coef)
+selected_vars <- names(lasso_coef[lasso_coef != 0])
+
+selected_vars <- setdiff(selected_vars, "(Intercept)")
+print(selected_vars)
+```
+
+
+
+## Logistic Regression Model Training
+```{r}
+training_data_scaled$mortstat <- as.factor(training_data_scaled$mortstat)
+test_data_scaled$mortstat <- as.factor(test_data_scaled$mortstat)
+
+logistic_model <- train(as.formula(paste("mortstat ~", paste(selected_vars, collapse=" + "))), 
+                        data=training_data_scaled, 
+                        method="glm", 
+                        family="binomial",
+                        trControl=trainControl(method="cv"))
+
+predicted_probs_logistic <- predict(logistic_model, newdata=test_data_scaled, type="prob")
+
+predicted_labels_logistic <- ifelse(predicted_probs_logistic$`1` > 0.5, 1, 0)
+
+test_data_scaled$mortstat <- as.factor(test_data_scaled$mortstat)
+predicted_labels_logistic <- as.factor(predicted_labels_logistic)
+
+confusion_mtx_logistic <- table(test_data_scaled$mortstat, predicted_labels_logistic)
+print(confusion_mtx_logistic)
+
+accuracy_logistic <- sum(diag(confusion_mtx_logistic)) / sum(confusion_mtx_logistic)
+print(paste("Accuracy (Logistic):", round(accuracy_logistic, 3)))
+
+sensitivity_logistic <- confusion_mtx_logistic[2,2] / sum(confusion_mtx_logistic[2,])
+print(paste("Sensitivity (Logistic):", round(sensitivity_logistic, 3)))
+
+specificity_logistic <- confusion_mtx_logistic[1,1] / sum(confusion_mtx_logistic[1,])
+print(paste("Specificity (Logistic):", round(specificity_logistic, 3)))
+
+```
+Logistic Regression has 49% sensitivity and 81% accuracy.
+
+
+# Random Forest
+```{r}
+library(randomForest)
+library(caret)
+
+```
+
+## Full model
+```{r}
+set.seed(1)
+rf_model <- randomForest(as.factor(mortstat) ~ ., data=training_data, importance=TRUE)
+```
+
+```{r}
+predicted_vals <- predict(rf_model, newdata=test_data, type="class")
+```
+
+```{r}
+confusion_mtx <- table(test_data$mortstat, predicted_vals)
+print(confusion_mtx)
+
+accuracy <- sum(diag(confusion_mtx)) / sum(confusion_mtx)
+print(paste("Accuracy:", round(accuracy, 3)))
+
+sensitivity <- confusion_mtx[2,2] / sum(confusion_mtx[2,])
+print(paste("Sensitivity:", round(sensitivity, 3)))
+
+specificity <- confusion_mtx[1,1] / sum(confusion_mtx[1,])
+print(paste("Specificity:", round(specificity, 3)))
+```
+
+## Feature selection
+```{r}
+importance(rf_model)
+important_vars <- importance(rf_model)[order(importance(rf_model, type=1, scale=TRUE)[,1], decreasing=TRUE), ]
+print(important_vars)
+```
+
+
+```{r}
+varImpPlot(rf_model)
+```
+
+
+
+
+### Selecting TOP 10 important variables.
+```{r}
+top6_features <- rownames(important_vars)[1:10]
+
+top6_formula <- as.formula(paste("as.factor(mortstat) ~", paste(top6_features, collapse=" + ")))
+rf_model_top6 <- randomForest(top6_formula, data=training_data, importance=TRUE)
+
+predicted_vals_top6 <- predict(rf_model_top6, newdata=test_data, type="class")
+
+
+confusion_mtx_top6 <- table(test_data$mortstat, predicted_vals_top6)
+print(confusion_mtx_top6)
+
+accuracy_top6 <- sum(diag(confusion_mtx_top6)) / sum(confusion_mtx_top6)
+print(paste("Accuracy with top 6 variables:", round(accuracy_top6, 3)))
+
+sensitivity_top6 <- confusion_mtx_top6[2,2] / sum(confusion_mtx_top6[2,])
+print(paste("Sensitivity with top 6 variables:", round(sensitivity_top6, 3)))
+
+specificity_top6 <- confusion_mtx_top6[1,1] / sum(confusion_mtx_top6[1,])
+print(paste("Specificity with top 6 variables:", round(specificity_top6, 3)))
+
+```
+
+# Classification Tree
+```{r}
+# Load necessary libraries
+library(rpart)
+library(rpart.plot)
+library(caret)
+
+set.seed(1)
+tree_model <- rpart(as.factor(mortstat) ~ ., data=training_data, method="class", cp=0.01)
+
+rpart.plot(tree_model, main="Decision Tree", under=TRUE, faclen=0)
+
+predicted_vals_tree <- predict(tree_model, newdata=test_data, type="class")
+
+confusion_mtx_tree <- table(test_data$mortstat, predicted_vals_tree)
+print(confusion_mtx_tree)
+
+accuracy_tree <- sum(diag(confusion_mtx_tree)) / sum(confusion_mtx_tree)
+print(paste("Accuracy:", round(accuracy_tree, 3)))
+
+sensitivity_tree <- confusion_mtx_tree[2,2] / sum(confusion_mtx_tree[2,])
+print(paste("Sensitivity:", round(sensitivity_tree, 3)))
+
+specificity_tree <- confusion_mtx_tree[1,1] / sum(confusion_mtx_tree[1,])
+print(paste("Specificity:", round(specificity_tree, 3)))
+
+```
+
+```{r}
+# Extract variable importance
+var_importance <- tree_model$variable.importance
+print(var_importance)
+# Sort by importance
+sorted_importance <- sort(var_importance, decreasing = TRUE)
+
+# Plot
+barplot(sorted_importance, las=2, main="Variable Importance", cex.names=0.7, col="lightblue", border="darkblue")
+
+```
+```{r}
+# Extract names of the top 10 important variables
+top_vars <- names(sorted_importance)
+print(top_vars)
+
+```
+
+```{r}
+library(caret)
+library(rpart)
+
+formula <- as.formula(paste("mortstat ~", paste(top_vars, collapse = "+")))
+
+tuned_tree <- train(
+  formula,
+  data = training_data,
+  method = "rpart",
+  trControl = trainControl(method = "cv", number = 5), 
+  tuneLength = 10  
+)
+
+print(tuned_tree)
+
+predicted_vals_tree <- predict(tuned_tree, newdata = test_data)
+
+confusion_mtx_tree <- table(test_data$mortstat, predicted_vals_tree)
+print(confusion_mtx_tree)
+
+accuracy <- sum(diag(confusion_mtx_tree)) / sum(confusion_mtx_tree)
+sensitivity <- confusion_mtx_tree[2,2] / sum(confusion_mtx_tree[2,])
+specificity <- confusion_mtx_tree[1,1] / sum(confusion_mtx_tree[1,])
+
+print(paste("Accuracy:", round(accuracy, 3)))
+print(paste("Sensitivity:", round(sensitivity, 3)))
+print(paste("Specificity:", round(specificity, 3)))
+
+```
+
+
+
